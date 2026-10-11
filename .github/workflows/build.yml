@@ -1,0 +1,115 @@
+name: Build KaelltzyyD1 Kernel
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android /opt/hostedtoolcache/CodeQL
+          df -h /
+
+      - name: Checkout kernel source
+        uses: actions/checkout@v4
+        with:
+          path: kernel-src
+          fetch-depth: 1
+
+      - name: Install dependencies
+        run: |
+          sudo apt update
+          sudo apt install -y bc bison flex libssl-dev libelf-dev lz4 zip cpio python3 rsync git curl
+          mkdir -p ~/bin
+          curl -s https://storage.googleapis.com/git-repo-downloads/repo > ~/bin/repo
+          chmod +x ~/bin/repo
+
+      - name: Sync AOSP kernel build tools
+        run: |
+          export PATH=$HOME/bin:$PATH
+          git config --global user.email "ci@example.com"
+          git config --global user.name "KaelltzyyD1"
+          git config --global color.ui false
+          mkdir aosp && cd aosp
+          repo init -u https://android.googlesource.com/kernel/manifest -b common-android12-5.10 --depth=1 --no-tags --no-repo-verify
+          repo sync -c -j8 --no-tags --no-clone-bundle
+          rm -rf common
+          mv ../kernel-src common
+
+      - name: Apply Schedhorizon governor
+        continue-on-error: true
+        working-directory: aosp/common
+        run: |
+          curl -sfL "https://github.com/LoggingNewMemory/SuiKernel-android12-5.10/compare/cc08dc3bfd1f2eadc6edc7603ed6d01c365c3d15...d1a5000f1f6eb13044716b7bc759ca3aeae2f8bc.patch" -o ../schedhorizon.patch
+          git am --3way ../schedhorizon.patch || { git am --abort; echo "Schedhorizon gagal diterapkan, lanjut tanpa itu"; exit 1; }
+
+      - name: Apply KaelltzyyD1 config
+        working-directory: aosp
+        run: |
+          # build.sh GKI menolak defconfig yang diedit manual, jadi pengecekannya dimatikan
+          grep -rl check_defconfig common/build.config.* | xargs -r sed -i 's/\bcheck_defconfig\b/true/g'
+          cat >> common/arch/arm64/configs/gki_defconfig << 'EOF'
+
+          # KaelltzyyD1
+          CONFIG_CPU_FREQ_GOV_SCHEDHORIZON=y
+          CONFIG_TCP_CONG_ADVANCED=y
+          CONFIG_TCP_CONG_BBR=y
+          CONFIG_TCP_CONG_BIC=n
+          CONFIG_TCP_CONG_WESTWOOD=n
+          CONFIG_TCP_CONG_HTCP=n
+          CONFIG_DEFAULT_BBR=y
+          CONFIG_DEFAULT_TCP_CONG="bbr"
+          CONFIG_MQ_IOSCHED_DEADLINE=n
+          CONFIG_MQ_IOSCHED_KYBER=n
+          CONFIG_IOSCHED_BFQ=n
+          CONFIG_BFQ_GROUP_IOSCHED=n
+          CONFIG_HZ_300=y
+          CONFIG_SCHED_MC=y
+          CONFIG_ZRAM=y
+          CONFIG_ZRAM_DEF_COMP_LZ4=y
+          CONFIG_ZSWAP=n
+          EOF
+
+      - name: Build kernel
+        working-directory: aosp
+        run: |
+          export KBUILD_BUILD_USER=KaelltzyyD1
+          LTO=thin BUILD_CONFIG=common/build.config.gki.aarch64 build/build.sh -j$(nproc)
+          ls out/*/dist/Image
+
+      - name: Package with AnyKernel3
+        run: |
+          git clone --depth=1 https://github.com/osm0sis/AnyKernel3
+          cp "$(ls aosp/out/*/dist/Image | head -n1)" AnyKernel3/Image
+          cat > AnyKernel3/anykernel.sh << 'EOF'
+          properties() { '
+          kernel.string=KaelltzyyD1 GKI 5.10
+          do.devicecheck=0
+          do.modules=0
+          do.systemless=0
+          do.cleanup=1
+          do.cleanuponabort=0
+          device.name1=
+          supported.versions=
+          supported.patchlevels=
+          supported.vendorpatchlevels=
+          '; }
+          BLOCK=boot;
+          IS_SLOT_DEVICE=auto;
+          RAMDISK_COMPRESSION=auto;
+          PATCH_VBMETA_FLAG=auto;
+          . tools/ak3-core.sh;
+          dump_boot;
+          write_boot;
+          EOF
+          cd AnyKernel3
+          zip -r9 ../KaelltzyyD1-GKI-5.10.zip * -x .git README.md '*placeholder'
+
+      - name: Upload
+        uses: actions/upload-artifact@v4
+        with:
+          name: KaelltzyyD1-GKI-5.10
+          path: KaelltzyyD1-GKI-5.10.zip
+          
