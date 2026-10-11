@@ -1,0 +1,80 @@
+name: Build KaelltzyyD1 Kernel
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout (shallow)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Install dependencies
+        run: |
+          sudo apt update
+          sudo apt install -y bc bison flex libssl-dev libelf-dev lz4 zip cpio python3 ccache patchelf
+
+      - name: Get Neutron clang
+        run: |
+          mkdir neutron-clang && cd neutron-clang
+          bash <(curl -s https://raw.githubusercontent.com/Neutron-Toolchains/antman/main/antman) -S
+          cd ..
+          ./neutron-clang/bin/clang --version
+
+      - name: Build kernel
+        run: |
+          export PATH=$PWD/neutron-clang/bin:$PATH
+          export ARCH=arm64
+          export KBUILD_BUILD_USER=KaelltzyyD1
+          make LLVM=1 LLVM_IAS=1 O=out gki_defconfig
+          # Tambahan governor CPU, BBR, dan I/O scheduler (default tetap bawaan)
+          scripts/config --file out/.config \
+            -e CPU_FREQ_GOV_PERFORMANCE \
+            -e CPU_FREQ_GOV_ONDEMAND \
+            -e CPU_FREQ_GOV_CONSERVATIVE \
+            -e CPU_FREQ_GOV_USERSPACE \
+            -e CPU_FREQ_GOV_SCHEDUTIL \
+            -e TCP_CONG_BBR \
+            -e MQ_IOSCHED_DEADLINE \
+            -e MQ_IOSCHED_KYBER \
+            -e IOSCHED_BFQ
+          make LLVM=1 LLVM_IAS=1 O=out olddefconfig
+          make LLVM=1 LLVM_IAS=1 O=out -j$(nproc) KCFLAGS="-Wno-error" Image
+
+      - name: Package with AnyKernel3
+        run: |
+          git clone --depth=1 https://github.com/osm0sis/AnyKernel3
+          cp out/arch/arm64/boot/Image AnyKernel3/
+          cat > AnyKernel3/anykernel.sh << 'EOF'
+          properties() { '
+          kernel.string=KaelltzyyD1 GKI 5.10
+          do.devicecheck=0
+          do.modules=0
+          do.systemless=0
+          do.cleanup=1
+          do.cleanuponabort=0
+          device.name1=
+          supported.versions=
+          supported.patchlevels=
+          supported.vendorpatchlevels=
+          '; }
+          BLOCK=boot;
+          IS_SLOT_DEVICE=auto;
+          RAMDISK_COMPRESSION=auto;
+          PATCH_VBMETA_FLAG=auto;
+          . tools/ak3-core.sh;
+          dump_boot;
+          write_boot;
+          EOF
+          cd AnyKernel3
+          zip -r9 ../KaelltzyyD1-GKI-5.10.zip * -x .git README.md '*placeholder'
+
+      - name: Upload
+        uses: actions/upload-artifact@v4
+        with:
+          name: KaelltzyyD1-GKI-5.10
+          path: KaelltzyyD1-GKI-5.10.zip
+          
